@@ -15,8 +15,9 @@
 //      projectiles, which keep their light, and poison sprays, which lose it whether lit or not;
 //   3. the Dragonborn poison rune gets the casting art its lit hand needs;
 //   4. with the Spray Lights option installed, each spray projectile gets a private copy of its own
-//      light, stretched to cover the spray and coloured from the installer's markers;
-//   5. an enchantment carrying two or more lit shaders keeps the light of its first one only.
+//      light, stretched to cover the spray and colored from the installer's markers;
+//   5. an enchantment carrying two or more lit shaders keeps the light of its first one only - the ones
+//      plugins define and the ones made at the enchanting table, never letting a save hold a copy.
 // If GlowifiedSkyrim.esp (the patcher's output) is active, nothing is changed at all.
 
 #include <RE/Skyrim.h>
@@ -30,12 +31,14 @@
 #include <format>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace
@@ -640,92 +643,195 @@ namespace
 	}
 
 	// ------------------------------------------------------------------ pass 5: enchantments with two lit shaders
+	// An enchantment carrying two or more lit shaders keeps the light of its first one; each other lit
+	// effect is pointed at an in-memory copy of its magic effect whose shader is an unlit copy.
+	//
+	// A form made in memory has no place in a save, so no saved form may ever point at one:
+	//   - enchantments from plugins are never written to a save, so they keep their copies;
+	//   - enchantments made during play (the enchanting table) ARE saved, so they get their copies
+	//     only between saves: the originals go back when a save starts and the copies return on the
+	//     next frame, after the save has been written;
+	//   - while the Crafting Menu is open every enchantment carries its originals, so the table builds
+	//     a new enchantment from effects that exist in a plugin.
 	struct Swap
 	{
 		RE::Effect*        effect;
 		RE::EffectSetting* original;
 		RE::EffectSetting* quiet;
 	};
-	std::vector<Swap> gSwaps;
+	std::vector<Swap> gSwaps;         // plugin enchantments, made once at data load
+	std::vector<Swap> gCreatedSwaps;  // enchantments made during play, rebuilt after every restore
 
-	std::string EnchantShaderID(const RE::EffectSetting* a_effect)
+	std::unordered_set<const RE::TESEffectShader*>                 gLitShaders;
+	std::unordered_map<const RE::TESEffectShader*, std::string>    gLitShaderNames;
+	std::unordered_map<RE::EffectSetting*, RE::EffectSetting*>     gQuietEffects;
+	std::unordered_map<RE::TESEffectShader*, RE::TESEffectShader*> gQuietShaders;
+	std::recursive_mutex                                           gSwapLock;
+	bool                                                           gCrafting = false;
+
+	const RE::TESEffectShader* LitShaderOf(const RE::Effect* a_effect)
 	{
-		return a_effect && a_effect->data.enchantShader ? Lower(EditorID(a_effect->data.enchantShader)) : std::string();
+		const auto* base = a_effect ? a_effect->baseEffect : nullptr;
+		const auto* shader = base ? base->data.enchantShader : nullptr;
+		return shader && gLitShaders.contains(shader) ? shader : nullptr;
+	}
+
+	RE::EffectSetting* QuietCopyOf(RE::EffectSetting* a_original)
+	{
+		auto& quiet = gQuietEffects[a_original];
+		if (!quiet) {
+			auto*& shader = gQuietShaders[a_original->data.enchantShader];
+			if (!shader) {
+				shader = CopyShader(a_original->data.enchantShader);
+			}
+			quiet = shader ? CopyEffect(a_original) : nullptr;
+			if (quiet) {
+				quiet->data.enchantShader = shader;
+			}
+		}
+		return quiet && quiet->data.enchantShader != a_original->data.enchantShader ? quiet : nullptr;
+	}
+
+	struct FixResult
+	{
+		std::size_t dropped{ 0 }, failed{ 0 };
+		const RE::TESEffectShader* kept{ nullptr };
+	};
+
+	// One enchantment, the keep-the-first rule. `a_log` writes a row per moved effect.
+	FixResult FixEnchantment(RE::EnchantmentItem* a_ench, std::vector<Swap>& a_out, bool a_log)
+	{
+		FixResult r;
+		std::size_t lit = 0;
+		for (auto* eff : a_ench->effects) {
+			if (const auto* shader = LitShaderOf(eff)) {
+				if (!r.kept) r.kept = shader;
+				++lit;
+			}
+		}
+		if (lit < 2) {
+			r.kept = nullptr;
+			return r;
+		}
+		bool keptOne = false;
+		for (std::size_t i = 0; i < a_ench->effects.size(); ++i) {
+			auto*       eff = a_ench->effects[i];
+			const auto* shader = LitShaderOf(eff);
+			if (!shader) {
+				continue;
+			}
+			if (shader == r.kept && !keptOne) {
+				keptOne = true;
+				continue;
+			}
+			auto* original = eff->baseEffect;
+			auto* quiet = QuietCopyOf(original);
+			if (!quiet) {
+				++r.failed;
+				SKSE::log::warn("[ENCH-FAILED] {} | effect {} | no quiet copy of {}", Label(a_ench), i, Label(original));
+				continue;
+			}
+			eff->baseEffect = quiet;
+			a_out.push_back({ eff, original, quiet });
+			++r.dropped;
+			if (a_log) {
+				SKSE::log::info("[ENCH-DROPPED] {} | effect {} | {} | {} now plays an unlit copy of its shader", Label(a_ench), i,
+					gLitShaderNames[shader], EditorID(original));
+			}
+		}
+		return r;
 	}
 
 	void DoubledEnchantments(const Coverage& a_cov)
 	{
-		std::unordered_map<RE::EffectSetting*, RE::EffectSetting*>     quietEffects;
-		std::unordered_map<RE::TESEffectShader*, RE::TESEffectShader*> quietShaders;
-		std::size_t scanned = 0, doubled = 0, fixed = 0, dropped = 0, failed = 0;
-
+		for (auto* shader : RE::TESDataHandler::GetSingleton()->GetFormArray<RE::TESEffectShader>()) {
+			const auto id = shader ? Lower(EditorID(shader)) : std::string();
+			if (!id.empty() && a_cov.shaders.contains(id)) {
+				gLitShaders.insert(shader);
+				gLitShaderNames[shader] = id;
+			}
+		}
+		std::size_t scanned = 0, fixed = 0, dropped = 0, failed = 0;
+		std::lock_guard lock(gSwapLock);
 		for (auto* ench : RE::TESDataHandler::GetSingleton()->GetFormArray<RE::EnchantmentItem>()) {
 			if (!ench) {
 				continue;
 			}
 			++scanned;
-			std::size_t claimed = 0;
-			std::string first;
-			for (auto* eff : ench->effects) {
-				const auto id = eff ? EnchantShaderID(eff->baseEffect) : std::string();
-				if (!id.empty() && a_cov.shaders.contains(id)) {
-					if (first.empty()) first = id;
-					++claimed;
-				}
-			}
-			if (claimed < 2) {
-				continue;
-			}
-			++doubled;
-			bool        keptOne = false;
-			std::size_t droppedHere = 0;
-			for (std::size_t i = 0; i < ench->effects.size(); ++i) {
-				auto* eff = ench->effects[i];
-				const auto id = eff ? EnchantShaderID(eff->baseEffect) : std::string();
-				if (id.empty() || !a_cov.shaders.contains(id)) {
-					continue;
-				}
-				if (id == first && !keptOne) {
-					keptOne = true;
-					continue;
-				}
-				auto* original = eff->baseEffect;
-				auto& quiet = quietEffects[original];
-				if (!quiet) {
-					auto*& shader = quietShaders[original->data.enchantShader];
-					if (!shader) {
-						shader = CopyShader(original->data.enchantShader);
-					}
-					quiet = shader ? CopyEffect(original) : nullptr;
-					if (quiet) {
-						quiet->data.enchantShader = shader;
-					}
-				}
-				if (!quiet || quiet->data.enchantShader == original->data.enchantShader) {
-					++failed;
-					SKSE::log::warn("[ENCH-FAILED] {} | effect {} | no quiet copy of {}", Label(ench), i, Label(original));
-					continue;
-				}
-				eff->baseEffect = quiet;
-				gSwaps.push_back({ eff, original, quiet });
-				++dropped;
-				++droppedHere;
-				SKSE::log::info("[ENCH-DROPPED] {} | effect {} | {} | {} now plays an unlit copy of its shader", Label(ench), i, id,
-					EditorID(original));
-			}
-			if (droppedHere) {
+			const auto r = FixEnchantment(ench, gSwaps, true);
+			dropped += r.dropped;
+			failed += r.failed;
+			if (r.dropped) {
 				++fixed;
-				SKSE::log::info("[ENCH-KEPT] {} | {} | {} other light(s) removed", Label(ench), first, droppedHere);
+				SKSE::log::info("[ENCH-KEPT] {} | {} | {} other light(s) removed", Label(ench), gLitShaderNames[r.kept], r.dropped);
 			}
 		}
-		SKSE::log::info("enchantments: {} scanned, {} carrying two or more lit shaders, {} fixed, {} effect(s) moved to "
-						"{} unlit effect copies and {} shader copies, {} failed",
-			scanned, doubled, fixed, dropped, quietEffects.size(), quietShaders.size(), failed);
+		SKSE::log::info("enchantments: {} scanned, {} lit shader(s), {} fixed, {} effect(s) moved to {} unlit effect copies and {} "
+						"shader copies, {} failed",
+			scanned, gLitShaders.size(), fixed, dropped, gQuietEffects.size(), gQuietShaders.size(), failed);
 	}
 
-	// While the crafting menu is open every enchantment carries its original effects, so an item the
-	// player enchants stores only effects that exist in a plugin - never a copy made in memory, which
-	// a save could not find again.
+	// Enchantments made during play carry FormIDs in the FF range and live only in the form map.
+	void FixCreatedEnchantments()
+	{
+		std::vector<RE::EnchantmentItem*> created;
+		{
+			const auto& [map, mapLock] = RE::TESForm::GetAllForms();
+			RE::BSReadLockGuard guard(mapLock.get());
+			if (map) {
+				for (const auto& [id, form] : *map) {
+					if (form && (id >> 24) == 0xFF && form->GetFormType() == RE::FormType::Enchantment) {
+						created.push_back(static_cast<RE::EnchantmentItem*>(form));
+					}
+				}
+			}
+		}
+		std::size_t fixed = 0, dropped = 0, failed = 0;
+		for (auto* ench : created) {
+			const auto r = FixEnchantment(ench, gCreatedSwaps, false);
+			dropped += r.dropped;
+			failed += r.failed;
+			if (r.dropped) {
+				++fixed;
+				SKSE::log::info("[ENCH-CREATED] {:08X} | {} | {} | {} other light(s) removed", ench->GetFormID(), ench->GetName(),
+					gLitShaderNames[r.kept], r.dropped);
+			}
+		}
+		SKSE::log::info("enchantments made during play: {} found, {} fixed, {} effect(s) moved, {} failed", created.size(), fixed,
+			dropped, failed);
+	}
+
+	// Every swapped effect back on the magic effect its plugin gave it.
+	void UseOriginals(std::string_view a_why)
+	{
+		std::lock_guard lock(gSwapLock);
+		for (auto& s : gSwaps) {
+			s.effect->baseEffect = s.original;
+		}
+		for (auto& s : gCreatedSwaps) {
+			s.effect->baseEffect = s.original;
+		}
+		SKSE::log::info("{}: {} plugin and {} crafted enchantment effect(s) back on their originals", a_why, gSwaps.size(),
+			gCreatedSwaps.size());
+		gCreatedSwaps.clear();
+	}
+
+	// The unlit copies back on, and every enchantment made during play checked again.
+	void UseQuiet(std::string_view a_why)
+	{
+		std::lock_guard lock(gSwapLock);
+		if (gCrafting) {
+			return;
+		}
+		for (auto& s : gSwaps) {
+			s.effect->baseEffect = s.quiet;
+		}
+		if (!gLitShaders.empty()) {
+			FixCreatedEnchantments();
+		}
+		SKSE::log::info("{}: unlit copies back on", a_why);
+	}
+
 	class CraftingWatch : public RE::BSTEventSink<RE::MenuOpenCloseEvent>
 	{
 	public:
@@ -738,11 +844,19 @@ namespace
 		RE::BSEventNotifyControl ProcessEvent(const RE::MenuOpenCloseEvent* a_event, RE::BSTEventSource<RE::MenuOpenCloseEvent>*) override
 		{
 			if (a_event && a_event->menuName == RE::CraftingMenu::MENU_NAME) {
-				for (auto& s : gSwaps) {
-					s.effect->baseEffect = a_event->opening ? s.original : s.quiet;
+				if (a_event->opening) {
+					{
+						std::lock_guard lock(gSwapLock);
+						gCrafting = true;
+					}
+					UseOriginals("crafting menu opened");
+				} else {
+					{
+						std::lock_guard lock(gSwapLock);
+						gCrafting = false;
+					}
+					UseQuiet("crafting menu closed");
 				}
-				SKSE::log::info("crafting menu {}: {} enchantment effect(s) {}", a_event->opening ? "opened" : "closed", gSwaps.size(),
-					a_event->opening ? "back on their originals" : "back on their unlit copies");
 			}
 			return RE::BSEventNotifyControl::kContinue;
 		}
@@ -776,7 +890,7 @@ namespace
 		PoisonRuneArt();
 		SprayLights();
 		DoubledEnchantments(cov);
-		if (!gSwaps.empty()) {
+		if (!gLitShaders.empty()) {
 			RE::UI::GetSingleton()->AddEventSink<RE::MenuOpenCloseEvent>(CraftingWatch::Get());
 		}
 		{
@@ -785,6 +899,40 @@ namespace
 			gEditorIDs.rehash(0);
 		}
 		SKSE::log::info("done");
+	}
+
+	void OnMessage(SKSE::MessagingInterface::Message* a_msg)
+	{
+		if (!a_msg) {
+			return;
+		}
+		switch (a_msg->type) {
+		case SKSE::MessagingInterface::kDataLoaded:
+			OnDataLoaded();
+			break;
+		case SKSE::MessagingInterface::kSaveGame:
+			// the save is written inside the call this message comes before; the copies return on the next frame
+			if (!gLitShaders.empty()) {
+				UseOriginals("saving");
+				SKSE::GetTaskInterface()->AddTask([]() { UseQuiet("save written"); });
+			}
+			break;
+		case SKSE::MessagingInterface::kPreLoadGame:
+			{
+				// the enchantments made during play are about to be replaced by the save's; never touch them again
+				std::lock_guard lock(gSwapLock);
+				gCreatedSwaps.clear();
+			}
+			break;
+		case SKSE::MessagingInterface::kPostLoadGame:
+		case SKSE::MessagingInterface::kNewGame:
+			if (!gLitShaders.empty()) {
+				UseQuiet("game loaded");
+			}
+			break;
+		default:
+			break;
+		}
 	}
 }
 
@@ -798,11 +946,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 	EditorIDHook<RE::TESObjectLIGH>::Install();
 	EditorIDHook<RE::TESEffectShader>::Install();
 	EditorIDHook<RE::EnchantmentItem>::Install();
-	SKSE::GetMessagingInterface()->RegisterListener([](SKSE::MessagingInterface::Message* a_msg) {
-		if (a_msg && a_msg->type == SKSE::MessagingInterface::kDataLoaded) {
-			OnDataLoaded();
-		}
-	});
+	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
 	SKSE::log::info("Let There Be Glow plugin loaded; waiting for the game's data");
 	return true;
 }
