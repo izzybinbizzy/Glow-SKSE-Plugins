@@ -1,4 +1,4 @@
-// Let There Be Glow - SKSE plugin
+// Luminous Arcana - SKSE plugin
 // Copyright (C) 2026 izzydoingit
 //
 // This program is free software: you can redistribute it and/or modify it under the terms of the
@@ -6,10 +6,9 @@
 // License, or (at your option) any later version. It is distributed WITHOUT ANY WARRANTY; see the
 // GNU General Public License in LICENSE.txt for details.
 //
-// What it does, once, when the game has finished loading its plugins. It is the in-memory
-// counterpart of the Glowified Patcher xEdit script and follows the same rules, so a player picks
-// one of the two and never both:
-//   1. a magic effect whose casting art Let There Be Glow or CS Light lights loses the game's own
+// What it does, once, when the game has finished loading its plugins:
+//   0. the magic lights Luminous Arcana was made against get their settings (see pass 0);
+//   1. a magic effect whose casting art Luminous Arcana or CS Light lights loses the game's own
 //      casting light, so the hand does not carry two lights;
 //   2. the same for projectiles, explosions and hazards whose model is lit - except cone and flame
 //      projectiles, which keep their light, and poison sprays, which lose it whether lit or not;
@@ -18,11 +17,13 @@
 //      light, stretched to cover the spray and colored from the installer's markers;
 //   5. an enchantment carrying two or more lit shaders keeps the light of its first one only - the ones
 //      plugins define and the ones made at the enchanting table, never letting a save hold a copy.
-// If GlowifiedSkyrim.esp (the patcher's output) is active, nothing is changed at all.
+// If Let There Be Glow's own plugin or its patch is active, nothing is changed at all: the two
+// mods are never installed together.
 //
 // Where each part lives: main.cpp (this file) runs the passes in order; Plugin.h lists what the files
 // share; Text.cpp, EditorIDs.cpp, Configs.cpp, SprayMarkers.cpp and FormCopies.cpp are the helpers;
-// CastingLights.cpp, EffectLights.cpp, PoisonRune.cpp, SprayLights.cpp and Enchantments.cpp are passes 1 to 5.
+// CastingLights.cpp, EffectLights.cpp, PoisonRune.cpp, SprayLights.cpp and Enchantments.cpp are passes 1 to 5;
+// LightSettings.cpp is pass 0.
 
 #include "Plugin.h"
 
@@ -32,6 +33,7 @@ namespace
 {
 	// ------------------------------------------------------------------ rules (the patcher's defaults)
 	constexpr std::string_view kPatchPlugin = "GlowifiedSkyrim.esp";
+	constexpr std::string_view kOtherPluginDll = "LetThereBeGlow.dll";
 
 	// ------------------------------------------------------------------ order of work
 	bool PatcherActive()
@@ -40,18 +42,25 @@ namespace
 		return dh->GetLoadedModIndex(kPatchPlugin).has_value() || dh->GetLoadedLightModIndex(kPatchPlugin).has_value();
 	}
 
+	bool OtherPluginLoaded()
+	{
+		return REX::W32::GetModuleHandleA(kOtherPluginDll.data()) != nullptr;
+	}
+
 	void OnDataLoaded()
 	{
-		if (PatcherActive()) {
-			SKSE::log::info("{} is active, so the xEdit patcher's changes are in use: this plugin changes nothing. "
-							"Use one or the other.",
-				kPatchPlugin);
+		const auto loadStarted = std::chrono::steady_clock::now();
+		if (PatcherActive() || OtherPluginLoaded()) {
+			SKSE::log::info("Let There Be Glow is installed ({} or {}): this plugin changes nothing. "
+							"Luminous Arcana and Let There Be Glow are never used together.",
+				kPatchPlugin, kOtherPluginDll);
 			return;
 		}
+		LightSettings();
 		const auto cov = ReadCoverage();
 		SKSE::log::info("configs: {} file(s), {} lit model(s), {} shader name(s)", cov.files, cov.models.size(), cov.shaders.size());
 		if (cov.files == 0) {
-			SKSE::log::warn("no Let There Be Glow or CS Light configs were found under Data\\LightPlacer; nothing was changed");
+			SKSE::log::warn("no Luminous Arcana configs were found under Data\\LightPlacer; nothing was changed");
 			return;
 		}
 		CastingLights(cov);
@@ -65,7 +74,8 @@ namespace
 			WatchCraftingMenu();
 		}
 		ForgetEditorIDs();
-		SKSE::log::info("done");
+		SKSE::log::info("done in {:.1f} ms",
+			std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - loadStarted).count());
 	}
 
 	void OnMessage(SKSE::MessagingInterface::Message* a_msg)
@@ -111,6 +121,6 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 	EditorIDHook<RE::TESEffectShader>::Install();
 	EditorIDHook<RE::EnchantmentItem>::Install();
 	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
-	SKSE::log::info("Let There Be Glow plugin loaded; waiting for the game's data");
+	SKSE::log::info("Luminous Arcana plugin loaded; waiting for the game's data");
 	return true;
 }

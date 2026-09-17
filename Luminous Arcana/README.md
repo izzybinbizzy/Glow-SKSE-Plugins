@@ -1,10 +1,14 @@
-# Let There Be Glow - SKSE plugin
+# Luminous Arcana - SKSE plugin
 
 Copyright (C) 2026 izzydoingit. GPL-3.0-or-later, see `../LICENSE`.
 
-The in-game alternative to the Glowified Patcher xEdit script. When the game has loaded its plugins it
-reads the Let There Be Glow and CS Light configs under `Data\LightPlacer\` and, in memory:
+Ships with Luminous Arcana and is required by it. When the game has loaded its plugins it reads the
+Luminous Arcana configs under `Data\LightPlacer\Luminous Arcana\` (at any depth) and, in memory:
 
+0. writes the settings Luminous Arcana's lights were made against onto twenty of the game's own magic
+   light records - radius, color, flags (inverse square among them), falloff, size, near distance,
+   flicker and fade - leaving alone any of them whose winning version comes from `CS Light.esp`, which
+   carries the same values;
 1. removes the game's own casting light from magic effects whose casting art those configs light;
 2. does the same for projectiles, explosions and hazards whose model is lit, keeping cone and flame
    projectiles lit and always removing poison spray lights;
@@ -15,7 +19,12 @@ reads the Let There Be Glow and CS Light configs under `Data\LightPlacer\` and, 
    restored while the Crafting Menu is open and while a save is written, so a save never stores an
    in-memory copy).
 
-It does nothing if `GlowifiedSkyrim.esp` is loaded. Every change is written to `LetThereBeGlow.log`.
+It changes nothing if Let There Be Glow's plugin (`LetThereBeGlow.dll`) or `GlowifiedSkyrim.esp` is
+loaded - the two mods are never used together. Every change, and how long the load pass took, is written
+to `LuminousArcana.log`.
+
+The source is generated from the Let There Be Glow plugin's source by the mod's build tool, with the light
+settings read out of the light records it replaces.
 
 ## Source layout
 
@@ -29,6 +38,7 @@ It does nothing if `GlowifiedSkyrim.esp` is loaded. Every change is written to `
 | `src/Configs.cpp` | reads the Light Placer configs and collects the models and shaders they light |
 | `src/SprayMarkers.cpp` | reads the installer's spray marker files |
 | `src/FormCopies.cpp` | in-memory copies of lights, effect shaders and magic effects |
+| `src/LightSettings.cpp` | pass 0 |
 | `src/CastingLights.cpp` | pass 1 |
 | `src/EffectLights.cpp` | pass 2 |
 | `src/PoisonRune.cpp` | pass 3 |
