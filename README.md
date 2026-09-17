@@ -4,7 +4,7 @@ Source code for the SKSE plugins that ship with my Skyrim Special Edition mods.
 
 | folder | plugin | ships with |
 |---|---|---|
-| `Let There Be Glow` | `LetThereBeGlow.dll` | Let There Be Glow (optional, instead of the xEdit patcher) |
+| `Let There Be Glow` | `LetThereBeGlow.dll` | Let There Be Glow (required) |
 | `Aetherial Radiance Sneak` | `AetherialRadianceSneak.dll` | Aetherial Radiance - Spells (optional sneaking page) |
 | `Luminous Arcana` | `LuminousArcana.dll` | Luminous Arcana (required) |
 

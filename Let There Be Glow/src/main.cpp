@@ -6,9 +6,7 @@
 // License, or (at your option) any later version. It is distributed WITHOUT ANY WARRANTY; see the
 // GNU General Public License in LICENSE.txt for details.
 //
-// What it does, once, when the game has finished loading its plugins. It is the in-memory
-// counterpart of the Glowified Patcher xEdit script and follows the same rules, so a player picks
-// one of the two and never both:
+// What it does, once, when the game has finished loading its plugins:
 //   1. a magic effect whose casting art Let There Be Glow or CS Light lights loses the game's own
 //      casting light, so the hand does not carry two lights;
 //   2. the same for projectiles, explosions and hazards whose model is lit - except cone and flame
@@ -18,7 +16,6 @@
 //      light, stretched to cover the spray and colored from the installer's markers;
 //   5. an enchantment carrying two or more lit shaders keeps the light of its first one only - the ones
 //      plugins define and the ones made at the enchanting table, never letting a save hold a copy.
-// If GlowifiedSkyrim.esp (the patcher's output) is active, nothing is changed at all.
 //
 // Where each part lives: main.cpp (this file) runs the passes in order; Plugin.h lists what the files
 // share; Text.cpp, EditorIDs.cpp, Configs.cpp, SprayMarkers.cpp and FormCopies.cpp are the helpers;
@@ -30,24 +27,9 @@ using namespace Plugin;
 
 namespace
 {
-	// ------------------------------------------------------------------ rules (the patcher's defaults)
-	constexpr std::string_view kPatchPlugin = "GlowifiedSkyrim.esp";
-
 	// ------------------------------------------------------------------ order of work
-	bool PatcherActive()
-	{
-		auto* dh = RE::TESDataHandler::GetSingleton();
-		return dh->GetLoadedModIndex(kPatchPlugin).has_value() || dh->GetLoadedLightModIndex(kPatchPlugin).has_value();
-	}
-
 	void OnDataLoaded()
 	{
-		if (PatcherActive()) {
-			SKSE::log::info("{} is active, so the xEdit patcher's changes are in use: this plugin changes nothing. "
-							"Use one or the other.",
-				kPatchPlugin);
-			return;
-		}
 		const auto cov = ReadCoverage();
 		SKSE::log::info("configs: {} file(s), {} lit model(s), {} shader name(s)", cov.files, cov.models.size(), cov.shaders.size());
 		if (cov.files == 0) {

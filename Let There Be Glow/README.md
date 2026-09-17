@@ -2,8 +2,8 @@
 
 Copyright (C) 2026 izzydoingit. GPL-3.0-or-later, see `../LICENSE`.
 
-The in-game alternative to the Glowified Patcher xEdit script. When the game has loaded its plugins it
-reads the Let There Be Glow and CS Light configs under `Data\LightPlacer\` and, in memory:
+Ships with Let There Be Glow and is required by it. When the game has loaded its plugins it reads the
+Let There Be Glow and CS Light configs under `Data\LightPlacer\` and, in memory:
 
 1. removes the game's own casting light from magic effects whose casting art those configs light;
 2. does the same for projectiles, explosions and hazards whose model is lit, keeping cone and flame
@@ -15,7 +15,7 @@ reads the Let There Be Glow and CS Light configs under `Data\LightPlacer\` and, 
    restored while the Crafting Menu is open and while a save is written, so a save never stores an
    in-memory copy).
 
-It does nothing if `GlowifiedSkyrim.esp` is loaded. Every change is written to `LetThereBeGlow.log`.
+Every change is written to `LetThereBeGlow.log`.
 
 ## Source layout
 
